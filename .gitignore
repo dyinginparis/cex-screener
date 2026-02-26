@@ -1,0 +1,27 @@
+.venv/
+.runlogs/
+__pycache__/
+*.py[cod]
+
+# Frontend artifacts
+frontend/node_modules/
+frontend/dist/
+
+# Python artifacts
+.pytest_cache/
+.mypy_cache/
+
+# Local IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local media / captures
+demo_frames/
+*.mkv
+*.mp4
+
+# Local environment files
+.env
+.env.*
+!.env.example
