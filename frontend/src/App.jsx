@@ -920,20 +920,27 @@ function App() {
         scaleMargins: { top: 0.08, bottom: 0.08 },
         borderVisible: true,
         borderColor: "#5579a8",
+        textColor: "#bed1f4",
         alignLabels: true,
+        ticksVisible: true,
+        entireTextOnly: false,
+        minimumWidth: 72,
+        ensureEdgeTickMarksVisible: true,
       });
     } catch {
       // optional pane/scale adjustment
     }
 
     try {
-      const rsiScale = chart.priceScale("right", 1);
+      const rsiScale = chart.priceScale("left", 1);
       rsiScale.applyOptions({
         visible: showRsi,
         autoScale: false,
         scaleMargins: { top: 0.12, bottom: 0.12 },
         borderVisible: true,
         borderColor: showRsi ? "#4fc3ff" : "#2b3c56",
+        textColor: "#9fdcff",
+        ticksVisible: true,
         alignLabels: true,
       });
       if (showRsi) {
@@ -944,7 +951,7 @@ function App() {
     }
 
     try {
-      const natrScale = chart.priceScale("right", 2);
+      const natrScale = chart.priceScale("left", 2);
       const maxNatr = (Array.isArray(natrPoints) ? natrPoints : []).reduce((maxValue, point) => {
         const value = Number(point?.value);
         if (!Number.isFinite(value)) {
@@ -958,6 +965,8 @@ function App() {
         scaleMargins: { top: 0.12, bottom: 0.12 },
         borderVisible: true,
         borderColor: showNatr ? "#ffb04a" : "#3f3527",
+        textColor: "#ffd6a0",
+        ticksVisible: true,
         alignLabels: true,
       });
       if (showNatr) {
@@ -1502,7 +1511,13 @@ function App() {
         horzLines: { color: "#16263f" },
       },
       rightPriceScale: {
+        visible: true,
+        ticksVisible: true,
         borderColor: "#213656",
+        textColor: "#bed1f4",
+        entireTextOnly: false,
+        minimumWidth: 72,
+        ensureEdgeTickMarksVisible: true,
       },
       timeScale: {
         borderColor: "#213656",
@@ -1527,13 +1542,15 @@ function App() {
         precision: 2,
         minMove: 0.01,
       },
+      priceLineVisible: true,
+      lastValueVisible: true,
     }, 0);
     const rsiSeries = chart.addSeries(
       LineSeries,
       {
         color: "#4fc3ff",
         lineWidth: 2.5,
-        priceScaleId: "right",
+        priceScaleId: "left",
         priceLineVisible: false,
         lastValueVisible: true,
         crosshairMarkerVisible: true,
@@ -1546,7 +1563,7 @@ function App() {
       {
         color: "#ffb04a",
         lineWidth: 2.5,
-        priceScaleId: "right",
+        priceScaleId: "left",
         priceLineVisible: false,
         lastValueVisible: true,
         crosshairMarkerVisible: true,
