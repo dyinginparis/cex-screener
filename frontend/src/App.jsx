@@ -640,10 +640,11 @@ function App() {
       return;
     }
 
+    const providerReady = Boolean(heatmapProviderMeta?.configured);
     let active = true;
     const controller = new AbortController();
     const timeoutId = window.setTimeout(async () => {
-      if (!heatmapConfigured) {
+      if (!providerReady) {
         setHeatmapSymbols([]);
         setHeatmapSymbolsError(
           "Heatmap provider is not configured. Set COINAPI_API_KEY in backend environment.",
@@ -703,7 +704,7 @@ function App() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [activeSection, heatmapConfigured, heatmapSymbolQuery]);
+  }, [activeSection, heatmapProviderMeta, heatmapSymbolQuery]);
 
   const loadHeatmapSnapshot = useCallback(
     async ({ symbolId, silent = false } = {}) => {
@@ -711,7 +712,8 @@ function App() {
       if (!targetSymbol) {
         return;
       }
-      if (!heatmapConfigured) {
+      const providerReady = Boolean(heatmapProviderMeta?.configured);
+      if (!providerReady) {
         setHeatmapError("Heatmap provider is not configured.");
         return;
       }
@@ -759,7 +761,7 @@ function App() {
         }
       }
     },
-    [heatmapBucketCount, heatmapConfigured, heatmapRangeBps, heatmapSymbolId],
+    [heatmapBucketCount, heatmapProviderMeta, heatmapRangeBps, heatmapSymbolId],
   );
 
   useEffect(() => {
