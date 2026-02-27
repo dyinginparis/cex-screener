@@ -39,11 +39,21 @@ npm run dev
 - Heatmap symbols: `http://localhost:8000/heatmap/symbols`
 - Heatmap snapshot: `http://localhost:8000/heatmap/orderbook`
 
-## Licensed Heatmap Setup
+## Heatmap Provider Setup
 
-The new **Orderbook Heatmap** tab uses a licensed provider path (CoinAPI) for commercial-ready data workflows.
+The **Orderbook Heatmap** tab supports:
 
-Set environment variable before starting backend:
+- `auto` (default): uses `ccxt` when no `COINAPI_API_KEY` is set, otherwise `coinapi`
+- `ccxt`: direct exchange snapshot orderbooks
+- `coinapi`: licensed provider path via CoinAPI
+
+Optional provider selection:
+
+```powershell
+$env:HEATMAP_PROVIDER="auto"   # auto | ccxt | coinapi
+```
+
+CoinAPI mode (if you want licensed-provider feed):
 
 ```powershell
 $env:COINAPI_API_KEY="your_coinapi_key"
@@ -52,6 +62,6 @@ $env:COINAPI_API_KEY="your_coinapi_key"
 Optional:
 
 ```powershell
-$env:HEATMAP_PROVIDER="coinapi"
 $env:COINAPI_REST_BASE="https://rest.coinapi.io"
+$env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
 ```

@@ -26,14 +26,21 @@ Server messages:
 - `diff` (`added`, `updated`, `removed`)
 - `error`
 
-## Heatmap Endpoints (Licensed Provider Mode)
+## Heatmap Endpoints
 
 - `GET /meta/heatmap`
-- `GET /heatmap/symbols?search=BTC&limit=120`
-- `GET /heatmap/orderbook?symbol_id=BINANCE_SPOT_BTC_USDT&levels=32&range_bps=300`
+- `GET /heatmap/symbols?search=BTC&limit=120&exchange_id=bybit&market_type=perpetual`
+- `GET /heatmap/orderbook?symbol_id=bybit|BTC/USDT:USDT&levels=32&range_bps=300`
 
-Required env var:
+Provider modes:
+- `HEATMAP_PROVIDER=auto` (default): `coinapi` if key exists, else `ccxt`
+- `HEATMAP_PROVIDER=ccxt`: direct exchange snapshot orderbook
+- `HEATMAP_PROVIDER=coinapi`: licensed provider path
+
+CoinAPI optional env:
 
 ```powershell
 $env:COINAPI_API_KEY="your_coinapi_key"
+$env:COINAPI_REST_BASE="https://rest.coinapi.io"
+$env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
 ```

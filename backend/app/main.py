@@ -24,13 +24,18 @@ EXCLUDED_EXCHANGE_TOKENS = ("kraken", "mexc")
 _chart_exchange_cache: dict[str, ccxt.Exchange] = {}
 _chart_exchange_locks: dict[str, asyncio.Lock] = {}
 
-HEATMAP_PROVIDER = os.getenv("HEATMAP_PROVIDER", "coinapi").strip().lower()
+HEATMAP_PROVIDER = os.getenv("HEATMAP_PROVIDER", "auto").strip().lower()
 COINAPI_REST_BASE = os.getenv("COINAPI_REST_BASE", "https://rest.coinapi.io").strip().rstrip("/")
 COINAPI_API_KEY = os.getenv("COINAPI_API_KEY", "").strip()
+HEATMAP_CCXT_DEFAULT_EXCHANGE = str(
+    os.getenv("HEATMAP_CCXT_DEFAULT_EXCHANGE", "bybit")
+).strip().lower()
 HEATMAP_SYMBOL_CACHE_TTL_SEC = 300.0
 HEATMAP_HTTP_TIMEOUT_SEC = 20.0
 _heatmap_symbol_cache: tuple[float, list[dict[str, Any]]] | None = None
 _heatmap_symbol_lock = asyncio.Lock()
+_heatmap_ccxt_symbol_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_heatmap_ccxt_symbol_locks: dict[str, asyncio.Lock] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,14 +86,31 @@ async def meta_exchanges() -> dict[str, Any]:
 
 
 def _heatmap_provider_info() -> dict[str, Any]:
+    provider = _resolve_heatmap_provider()
+    configured = False
+    notes: list[str] = []
+
+    if provider == "coinapi":
+        configured = bool(COINAPI_API_KEY)
+        notes = [
+            "CoinAPI mode requires a commercial CoinAPI plan and valid API key.",
+            "Redistribution/resale rights depend on your CoinAPI contract.",
+        ]
+    elif provider == "ccxt":
+        configured = True
+        notes = [
+            "CCXT mode uses direct exchange APIs (snapshot orderbooks).",
+            "Commercial rights depend on each exchange API Terms.",
+        ]
+    else:
+        notes = [f"Unsupported provider '{provider}'."]
+
     return {
-        "provider": HEATMAP_PROVIDER,
-        "configured": HEATMAP_PROVIDER == "coinapi" and bool(COINAPI_API_KEY),
-        "legal_mode": "licensed-commercial-feed-required",
-        "notes": [
-            "Heatmap endpoint is intended for licensed/commercial market-data usage.",
-            "Redistribution/resale rights depend on your provider agreement.",
-        ],
+        "provider": provider,
+        "configured": configured,
+        "legal_mode": "provider-terms-required",
+        "default_exchange": HEATMAP_CCXT_DEFAULT_EXCHANGE,
+        "notes": notes,
     }
 
 
@@ -97,13 +119,21 @@ async def meta_heatmap() -> dict[str, Any]:
     return _heatmap_provider_info()
 
 
-def _ensure_heatmap_provider_ready() -> None:
-    if HEATMAP_PROVIDER != "coinapi":
+def _resolve_heatmap_provider() -> str:
+    raw = str(HEATMAP_PROVIDER or "").strip().lower()
+    if raw in {"", "auto"}:
+        return "coinapi" if COINAPI_API_KEY else "ccxt"
+    return raw
+
+
+def _ensure_heatmap_provider_ready() -> str:
+    provider = _resolve_heatmap_provider()
+    if provider not in {"coinapi", "ccxt"}:
         raise HTTPException(
             status_code=501,
-            detail=f"unsupported HEATMAP_PROVIDER '{HEATMAP_PROVIDER}'. expected: coinapi",
+            detail=f"unsupported HEATMAP_PROVIDER '{HEATMAP_PROVIDER}'. expected: auto|coinapi|ccxt",
         )
-    if not COINAPI_API_KEY:
+    if provider == "coinapi" and not COINAPI_API_KEY:
         raise HTTPException(
             status_code=503,
             detail=(
@@ -111,6 +141,7 @@ def _ensure_heatmap_provider_ready() -> None:
                 "to use licensed heatmap data."
             ),
         )
+    return provider
 
 
 def _coinapi_headers() -> dict[str, str]:
@@ -206,13 +237,133 @@ async def _get_heatmap_symbols_cached() -> list[dict[str, Any]]:
         return symbols
 
 
+def _heatmap_market_type_matches(market: dict[str, Any], market_type: str) -> bool:
+    mode = str(market_type or "both").strip().lower()
+    if mode == "perpetual":
+        return bool(market.get("swap"))
+    if mode == "spot":
+        return bool(market.get("spot"))
+    return bool(market.get("swap") or market.get("spot") or market.get("future"))
+
+
+def _heatmap_market_type_label(market: dict[str, Any]) -> str:
+    if market.get("swap"):
+        return "PERPETUAL"
+    if market.get("future"):
+        return "FUTURES"
+    if market.get("spot"):
+        return "SPOT"
+    return "UNKNOWN"
+
+
+def _build_ccxt_heatmap_symbols(
+    exchange: ccxt.Exchange,
+    exchange_id: str,
+    market_type: str,
+) -> list[dict[str, Any]]:
+    markets = exchange.load_markets()
+    rows: list[dict[str, Any]] = []
+
+    for symbol, market in markets.items():
+        if not isinstance(market, dict):
+            continue
+        if not market.get("active", True):
+            continue
+        if not _heatmap_market_type_matches(market, market_type):
+            continue
+
+        base = str(market.get("base") or "").strip().upper()
+        quote = str(market.get("quote") or "").strip().upper()
+        symbol_type = _heatmap_market_type_label(market)
+        rows.append(
+            {
+                "symbol_id": f"{exchange_id}|{symbol}",
+                "exchange_id": exchange_id,
+                "base": base,
+                "quote": quote,
+                "symbol_type": symbol_type,
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            str(item.get("exchange_id") or ""),
+            str(item.get("base") or ""),
+            str(item.get("quote") or ""),
+            str(item.get("symbol_id") or ""),
+        )
+    )
+    return rows
+
+
+async def _get_ccxt_heatmap_symbols_cached(exchange_id: str, market_type: str) -> list[dict[str, Any]]:
+    cache_key = f"{exchange_id}|{market_type}"
+    now_ts = time.time()
+    cached = _heatmap_ccxt_symbol_cache.get(cache_key)
+    if cached and (now_ts - cached[0]) < HEATMAP_SYMBOL_CACHE_TTL_SEC:
+        return cached[1]
+
+    lock = _heatmap_ccxt_symbol_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        now_ts = time.time()
+        cached = _heatmap_ccxt_symbol_cache.get(cache_key)
+        if cached and (now_ts - cached[0]) < HEATMAP_SYMBOL_CACHE_TTL_SEC:
+            return cached[1]
+
+        exchange = await _get_chart_exchange(exchange_id)
+        try:
+            rows = await asyncio.to_thread(_build_ccxt_heatmap_symbols, exchange, exchange_id, market_type)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{exchange_id}: heatmap symbols build failed ({exc})",
+            ) from exc
+        _heatmap_ccxt_symbol_cache[cache_key] = (now_ts, rows)
+        return rows
+
+
+def _parse_ccxt_symbol_id(symbol_id: str) -> tuple[str, str]:
+    raw = str(symbol_id or "").strip()
+    if "|" not in raw:
+        raise HTTPException(
+            status_code=400,
+            detail="ccxt heatmap symbol_id must be formatted as 'exchange_id|symbol'",
+        )
+    exchange_id, symbol = raw.split("|", 1)
+    normalized_exchange = normalize_exchange_id(exchange_id)
+    normalized_symbol = str(symbol or "").strip()
+    if not normalized_exchange or not normalized_symbol:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid ccxt symbol_id format. expected 'exchange_id|symbol'",
+        )
+    if not is_exchange_allowed(normalized_exchange):
+        raise HTTPException(status_code=403, detail=f"exchange blocked: {normalized_exchange}")
+    return normalized_exchange, normalized_symbol
+
 @app.get("/heatmap/symbols")
 async def heatmap_symbols(
     search: str = Query("", description="Case-insensitive symbol filter"),
     limit: int = Query(120, ge=10, le=500),
+    exchange_id: str | None = Query(None, description="Required for ccxt mode; ignored by coinapi mode"),
+    market_type: str = Query("both", description="both|perpetual|spot (used in ccxt mode)"),
 ) -> dict[str, Any]:
-    _ensure_heatmap_provider_ready()
-    symbols = await _get_heatmap_symbols_cached()
+    provider = _ensure_heatmap_provider_ready()
+    normalized_market_type = str(market_type or "both").strip().lower()
+    if normalized_market_type not in {"both", "perpetual", "spot"}:
+        raise HTTPException(status_code=400, detail="invalid market_type. expected both|perpetual|spot")
+
+    if provider == "coinapi":
+        symbols = await _get_heatmap_symbols_cached()
+        selected_exchange = None
+    else:
+        selected_exchange = normalize_exchange_id(exchange_id or HEATMAP_CCXT_DEFAULT_EXCHANGE)
+        if not selected_exchange:
+            raise HTTPException(status_code=400, detail="exchange_id is required for ccxt heatmap mode")
+        if not is_exchange_allowed(selected_exchange):
+            raise HTTPException(status_code=403, detail=f"exchange blocked: {selected_exchange}")
+        symbols = await _get_ccxt_heatmap_symbols_cached(selected_exchange, normalized_market_type)
+
     query = str(search or "").strip().lower()
 
     if query:
@@ -228,7 +379,9 @@ async def heatmap_symbols(
         filtered = symbols
 
     return {
-        "provider": HEATMAP_PROVIDER,
+        "provider": provider,
+        "exchange_id": selected_exchange,
+        "market_type": normalized_market_type,
         "count": len(filtered),
         "items": filtered[:limit],
     }
@@ -372,16 +525,41 @@ def _fetch_coinapi_orderbook(symbol_id: str, limit_levels: int) -> dict[str, Any
 
 @app.get("/heatmap/orderbook")
 async def heatmap_orderbook(
-    symbol_id: str = Query(..., description="CoinAPI symbol id (e.g. BINANCE_SPOT_BTC_USDT)"),
+    symbol_id: str = Query(
+        ...,
+        description=(
+            "Provider symbol id. coinapi: BINANCE_SPOT_BTC_USDT; "
+            "ccxt: exchange_id|symbol (e.g. bybit|BTC/USDT:USDT)"
+        ),
+    ),
     levels: int = Query(32, ge=12, le=120, description="Heatmap bucket count per side"),
     range_bps: float = Query(300.0, ge=25.0, le=2500.0, description="Visible range in basis points from mid"),
 ) -> dict[str, Any]:
-    _ensure_heatmap_provider_ready()
+    provider = _ensure_heatmap_provider_ready()
     normalized_symbol = str(symbol_id or "").strip()
     if not normalized_symbol:
         raise HTTPException(status_code=400, detail="symbol_id is required")
 
-    raw_book = await asyncio.to_thread(_fetch_coinapi_orderbook, normalized_symbol, max(120, levels * 3))
+    if provider == "coinapi":
+        raw_book = await asyncio.to_thread(_fetch_coinapi_orderbook, normalized_symbol, max(120, levels * 3))
+        resolved_exchange_id: str | None = None
+    else:
+        exchange_id, ccxt_symbol = _parse_ccxt_symbol_id(normalized_symbol)
+        exchange = await _get_chart_exchange(exchange_id)
+        if not exchange.has.get("fetchOrderBook"):
+            raise HTTPException(status_code=400, detail=f"{exchange_id}: fetchOrderBook not supported")
+        try:
+            await asyncio.to_thread(exchange.load_markets)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"{exchange_id}: load_markets failed ({exc})") from exc
+        if ccxt_symbol not in exchange.markets:
+            raise HTTPException(status_code=404, detail=f"{exchange_id}: symbol not found: {ccxt_symbol}")
+        try:
+            raw_book = await asyncio.to_thread(exchange.fetch_order_book, ccxt_symbol, max(120, levels * 3))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"{exchange_id}: fetch_order_book failed ({exc})") from exc
+        resolved_exchange_id = exchange_id
+
     bids = _parse_orderbook_side(raw_book.get("bids"))
     asks = _parse_orderbook_side(raw_book.get("asks"))
     bids.sort(key=lambda item: item[0], reverse=True)
@@ -403,7 +581,8 @@ async def heatmap_orderbook(
     ask_bins = _aggregate_side_bins(asks, mid_price, "ask", levels, range_bps)
 
     return {
-        "provider": HEATMAP_PROVIDER,
+        "provider": provider,
+        "exchange_id": resolved_exchange_id,
         "symbol_id": normalized_symbol,
         "mid_price": mid_price,
         "spread_bps": spread_bps,
@@ -711,6 +890,7 @@ async def ws_live(websocket: WebSocket) -> None:
 
 @app.on_event("shutdown")
 async def close_chart_exchanges() -> None:
+    global _heatmap_symbol_cache
     for exchange in _chart_exchange_cache.values():
         close_method = getattr(exchange, "close", None)
         if callable(close_method):
@@ -720,3 +900,6 @@ async def close_chart_exchanges() -> None:
                 pass
     _chart_exchange_cache.clear()
     _chart_exchange_locks.clear()
+    _heatmap_symbol_cache = None
+    _heatmap_ccxt_symbol_cache.clear()
+    _heatmap_ccxt_symbol_locks.clear()

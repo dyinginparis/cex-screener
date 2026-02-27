@@ -478,6 +478,8 @@ function App() {
   const [heatmapSymbolsLoading, setHeatmapSymbolsLoading] = useState(false);
   const [heatmapSymbolsError, setHeatmapSymbolsError] = useState("");
   const [heatmapSymbolId, setHeatmapSymbolId] = useState("");
+  const [heatmapExchangeId, setHeatmapExchangeId] = useState(DEFAULT_SELECTED_EXCHANGES[0] || "bybit");
+  const [heatmapMarketType, setHeatmapMarketType] = useState("perpetual");
   const [heatmapBucketCount, setHeatmapBucketCount] = useState(HEATMAP_DEFAULT_BUCKETS);
   const [heatmapRangeBps, setHeatmapRangeBps] = useState(HEATMAP_DEFAULT_RANGE_BPS);
   const [heatmapRefreshSec, setHeatmapRefreshSec] = useState(HEATMAP_DEFAULT_REFRESH_SEC);
@@ -596,6 +598,22 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setHeatmapExchangeId((previous) => {
+      const current = String(previous || "").trim();
+      if (current && allExchanges.includes(current)) {
+        return current;
+      }
+      if (selectedExchanges.length > 0 && allExchanges.includes(selectedExchanges[0])) {
+        return selectedExchanges[0];
+      }
+      if (allExchanges.length > 0) {
+        return allExchanges[0];
+      }
+      return current || "bybit";
+    });
+  }, [allExchanges, selectedExchanges]);
+
+  useEffect(() => {
     let active = true;
     const controller = new AbortController();
 
@@ -646,9 +664,7 @@ function App() {
     const timeoutId = window.setTimeout(async () => {
       if (!providerReady) {
         setHeatmapSymbols([]);
-        setHeatmapSymbolsError(
-          "Heatmap provider is not configured. Set COINAPI_API_KEY in backend environment.",
-        );
+        setHeatmapSymbolsError("Heatmap provider is not configured.");
         return;
       }
 
@@ -658,6 +674,8 @@ function App() {
         const params = new URLSearchParams({
           search: String(heatmapSymbolQuery || ""),
           limit: "250",
+          exchange_id: String(heatmapExchangeId || ""),
+          market_type: String(heatmapMarketType || "both"),
         });
         const response = await fetch(`${API_BASE_URL}/heatmap/symbols?${params.toString()}`, {
           signal: controller.signal,
@@ -704,7 +722,13 @@ function App() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [activeSection, heatmapProviderMeta, heatmapSymbolQuery]);
+  }, [activeSection, heatmapProviderMeta, heatmapSymbolQuery, heatmapExchangeId, heatmapMarketType]);
+
+  useEffect(() => {
+    setHeatmapSymbolId("");
+    setHeatmapData(null);
+    setHeatmapError("");
+  }, [heatmapExchangeId, heatmapMarketType]);
 
   const loadHeatmapSnapshot = useCallback(
     async ({ symbolId, silent = false } = {}) => {
@@ -763,6 +787,22 @@ function App() {
     },
     [heatmapBucketCount, heatmapProviderMeta, heatmapRangeBps, heatmapSymbolId],
   );
+
+  useEffect(() => {
+    if (activeSection !== "heatmap") {
+      return;
+    }
+    if (heatmapSymbolId) {
+      return;
+    }
+    if (heatmapSymbols.length === 0) {
+      return;
+    }
+    const firstSymbol = String(heatmapSymbols[0]?.symbol_id || "").trim();
+    if (firstSymbol) {
+      setHeatmapSymbolId(firstSymbol);
+    }
+  }, [activeSection, heatmapSymbolId, heatmapSymbols]);
 
   useEffect(() => {
     if (activeSection !== "heatmap") {
@@ -985,6 +1025,7 @@ function App() {
   const showNatrColumn = showNatrInChart || natrFilterUiActive;
   const heatmapConfigured = Boolean(heatmapProviderMeta?.configured);
   const heatmapProviderName = String(heatmapProviderMeta?.provider || "unknown");
+  const heatmapProviderNotes = Array.isArray(heatmapProviderMeta?.notes) ? heatmapProviderMeta.notes : [];
   const heatmapBids = Array.isArray(heatmapData?.bids) ? heatmapData.bids : [];
   const heatmapAsks = Array.isArray(heatmapData?.asks) ? heatmapData.asks : [];
   const selectedHeatmapSymbolOption = useMemo(
@@ -1131,7 +1172,7 @@ function App() {
     }
   };
 
-  const updateIndicatorScale = (rsiPoints = [], natrPoints = []) => {
+  const updateIndicatorScale = (natrPoints = []) => {
     const chart = chartApiRef.current;
     if (!chart) {
       return;
@@ -1283,9 +1324,9 @@ function App() {
     if (lastCandle) {
       candleSeries.update(lastCandle);
     }
-    const rsiPoints = refreshRsiChartSeries();
+    refreshRsiChartSeries();
     const natrPoints = refreshNatrChartSeries();
-    updateIndicatorScale(rsiPoints, natrPoints);
+    updateIndicatorScale(natrPoints);
   };
 
   const clearReconnectTimer = () => {
@@ -1568,7 +1609,7 @@ function App() {
     candleSeriesRef.current?.setData([]);
     rsiSeriesRef.current?.setData([]);
     natrSeriesRef.current?.setData([]);
-    updateIndicatorScale([], []);
+    updateIndicatorScale([]);
     clearDrawings();
     setChartError("");
     setErrors([]);
@@ -1615,7 +1656,7 @@ function App() {
     candleSeriesRef.current?.setData([]);
     rsiSeriesRef.current?.setData([]);
     natrSeriesRef.current?.setData([]);
-    updateIndicatorScale([], []);
+    updateIndicatorScale([]);
     clearDrawings();
     setChartError("");
     setStats(null);
@@ -1658,7 +1699,7 @@ function App() {
     candleSeriesRef.current?.setData([]);
     rsiSeriesRef.current?.setData([]);
     natrSeriesRef.current?.setData([]);
-    updateIndicatorScale([], []);
+    updateIndicatorScale([]);
     clearDrawings();
     setChartError("");
     setStats(null);
@@ -1706,7 +1747,7 @@ function App() {
       candleSeriesRef.current?.setData([]);
       rsiSeriesRef.current?.setData([]);
       natrSeriesRef.current?.setData([]);
-      updateIndicatorScale([], []);
+      updateIndicatorScale([]);
       clearDrawings();
       setChartError("");
       setErrors([]);
@@ -1893,7 +1934,7 @@ function App() {
     candleSeries.setData([]);
     rsiSeries.setData([]);
     natrSeries.setData([]);
-    updateIndicatorScale([], []);
+    updateIndicatorScale([]);
 
     const handleChartClick = (param) => {
       if (!drawingModeRef.current) {
@@ -2003,7 +2044,7 @@ function App() {
       natrSeriesRef.current?.setData([]);
       rsiSeriesRef.current?.applyOptions({ visible: false });
       natrSeriesRef.current?.applyOptions({ visible: false });
-      updateIndicatorScale([], []);
+      updateIndicatorScale([]);
       clearDrawings();
       return;
     }
@@ -2080,7 +2121,7 @@ function App() {
         candleSeriesRef.current?.setData([]);
         rsiSeriesRef.current?.setData([]);
         natrSeriesRef.current?.setData([]);
-        updateIndicatorScale([], []);
+        updateIndicatorScale([]);
       } finally {
         if (active) {
           setChartLoading(false);
@@ -2107,9 +2148,9 @@ function App() {
   }, [rowsById, selectedRowId]);
 
   useEffect(() => {
-    const rsiPoints = refreshRsiChartSeries();
+    refreshRsiChartSeries();
     const natrPoints = refreshNatrChartSeries();
-    updateIndicatorScale(rsiPoints, natrPoints);
+    updateIndicatorScale(natrPoints);
   }, [showRsiInChart, rsiPeriod, showNatrInChart, natrPeriod, selectedRowId]);
 
   useEffect(() => {
@@ -2716,6 +2757,29 @@ function App() {
         <section className="heatmap-panel">
           <div className="heatmap-toolbar">
             <div className="heatmap-controls">
+              <div className="row-2">
+                <label>
+                  Exchange
+                  <select value={heatmapExchangeId} onChange={(event) => setHeatmapExchangeId(event.target.value)}>
+                    {allExchanges.length === 0 && (
+                      <option value={heatmapExchangeId || "bybit"}>{heatmapExchangeId || "bybit"}</option>
+                    )}
+                    {allExchanges.map((exchangeId) => (
+                      <option key={exchangeId} value={exchangeId}>
+                        {exchangeId}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Market type
+                  <select value={heatmapMarketType} onChange={(event) => setHeatmapMarketType(event.target.value)}>
+                    <option value="both">both</option>
+                    <option value="perpetual">perpetual</option>
+                    <option value="spot">spot</option>
+                  </select>
+                </label>
+              </div>
               <label>
                 Symbol search
                 <input
@@ -2772,6 +2836,7 @@ function App() {
             <div className="heatmap-meta">
               <div>Provider: {heatmapProviderName}</div>
               <div>Configured: {heatmapConfigured ? "yes" : "no"}</div>
+              <div>Exchange: {heatmapExchangeId || "-"}</div>
               <div>
                 Symbol: {selectedHeatmapSymbolOption ? formatHeatmapSymbolLabel(selectedHeatmapSymbolOption) : "-"}
               </div>
@@ -2786,14 +2851,20 @@ function App() {
             </div>
           </div>
 
-          {heatmapSymbolsLoading && <div className="meta-note">Loading licensed symbols...</div>}
+          {heatmapSymbolsLoading && <div className="meta-note">Loading heatmap symbols...</div>}
+          {heatmapProviderNotes.length > 0 && (
+            <div className="meta-note">{heatmapProviderNotes.join(" ")}</div>
+          )}
           {heatmapSymbolsError && <div className="meta-error">{heatmapSymbolsError}</div>}
           {heatmapError && <div className="meta-error">{heatmapError}</div>}
 
-          {!heatmapConfigured && (
+          {!heatmapConfigured && heatmapProviderName === "coinapi" && (
             <div className="meta-note">
               Heatmap requires licensed provider credentials on backend. Set `COINAPI_API_KEY` and restart backend.
             </div>
+          )}
+          {heatmapConfigured && heatmapSymbols.length === 0 && !heatmapSymbolsLoading && (
+            <div className="meta-note">No matching symbols found. Try another exchange or search term.</div>
           )}
 
           <div className="heatmap-canvas">
