@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CandlestickSeries, LineSeries, createChart } from "lightweight-charts";
 import "./App.css";
 
@@ -20,6 +20,9 @@ const WS_STALE_TIMEOUT_MS = 60000;
 const WS_STALE_CHECK_INTERVAL_MS = 10000;
 const WS_AUTO_RECOVERY_COOLDOWN_MS = 15000;
 const WS_AUTO_RECOVERY_STALE_MS = 20000;
+const HEATMAP_DEFAULT_BUCKETS = 32;
+const HEATMAP_DEFAULT_RANGE_BPS = 300;
+const HEATMAP_DEFAULT_REFRESH_SEC = 3;
 const CHART_TIMEFRAME_MS = {
   "1m": 60_000,
   "3m": 180_000,
@@ -310,6 +313,18 @@ function normalizeText(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+function formatHeatmapSymbolLabel(item) {
+  const exchangeId = String(item?.exchange_id || "").toUpperCase();
+  const base = String(item?.base || "");
+  const quote = String(item?.quote || "");
+  const symbolType = String(item?.symbol_type || "");
+  const symbolId = String(item?.symbol_id || "");
+  if (exchangeId && base && quote) {
+    return `${exchangeId} ${base}/${quote} (${symbolType || "UNKNOWN"})`;
+  }
+  return symbolId;
+}
+
 function isExchangeAllowed(exchangeId) {
   const normalized = normalizeText(exchangeId);
   if (!normalized) {
@@ -410,6 +425,7 @@ function fuzzyScore(candidate, query) {
 }
 
 function App() {
+  const [activeSection, setActiveSection] = useState("scanner");
   const [connected, setConnected] = useState(false);
   const [engineState, setEngineState] = useState("idle");
   const [lastUpdate, setLastUpdate] = useState("-");
@@ -456,6 +472,18 @@ function App() {
   const [natrTimeframe, setNatrTimeframe] = useState("1h");
   const [natrPeriod, setNatrPeriod] = useState(14);
   const [showNatrInChart, setShowNatrInChart] = useState(false);
+  const [heatmapProviderMeta, setHeatmapProviderMeta] = useState(null);
+  const [heatmapSymbolQuery, setHeatmapSymbolQuery] = useState("");
+  const [heatmapSymbols, setHeatmapSymbols] = useState([]);
+  const [heatmapSymbolsLoading, setHeatmapSymbolsLoading] = useState(false);
+  const [heatmapSymbolsError, setHeatmapSymbolsError] = useState("");
+  const [heatmapSymbolId, setHeatmapSymbolId] = useState("");
+  const [heatmapBucketCount, setHeatmapBucketCount] = useState(HEATMAP_DEFAULT_BUCKETS);
+  const [heatmapRangeBps, setHeatmapRangeBps] = useState(HEATMAP_DEFAULT_RANGE_BPS);
+  const [heatmapRefreshSec, setHeatmapRefreshSec] = useState(HEATMAP_DEFAULT_REFRESH_SEC);
+  const [heatmapData, setHeatmapData] = useState(null);
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+  const [heatmapError, setHeatmapError] = useState("");
 
   const wsRef = useRef(null);
   const pendingRef = useRef([]);
@@ -490,6 +518,7 @@ function App() {
   const lastFilterKeyRef = useRef("");
   const sendRef = useRef(null);
   const filterConfigRef = useRef(null);
+  const heatmapRequestSeqRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -565,6 +594,192 @@ function App() {
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
+    const loadHeatmapMeta = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/meta/heatmap`, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (!active) {
+          return;
+        }
+        setHeatmapProviderMeta(payload || null);
+      } catch (error) {
+        const isAbort =
+          typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          error.name === "AbortError";
+        if (!active || isAbort) {
+          return;
+        }
+        setHeatmapProviderMeta({
+          provider: "unknown",
+          configured: false,
+          legal_mode: "unavailable",
+          notes: [`Heatmap provider metadata failed (${String(error)})`],
+        });
+      }
+    };
+
+    loadHeatmapMeta();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeSection !== "heatmap") {
+      return;
+    }
+
+    let active = true;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(async () => {
+      if (!heatmapConfigured) {
+        setHeatmapSymbols([]);
+        setHeatmapSymbolsError(
+          "Heatmap provider is not configured. Set COINAPI_API_KEY in backend environment.",
+        );
+        return;
+      }
+
+      setHeatmapSymbolsLoading(true);
+      setHeatmapSymbolsError("");
+      try {
+        const params = new URLSearchParams({
+          search: String(heatmapSymbolQuery || ""),
+          limit: "250",
+        });
+        const response = await fetch(`${API_BASE_URL}/heatmap/symbols?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          let detail = `HTTP ${response.status}`;
+          try {
+            const payload = await response.json();
+            if (payload?.detail) {
+              detail = String(payload.detail);
+            }
+          } catch {
+            // ignore payload parsing errors
+          }
+          throw new Error(detail);
+        }
+
+        const payload = await response.json();
+        if (!active) {
+          return;
+        }
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        setHeatmapSymbols(items);
+      } catch (error) {
+        const isAbort =
+          typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          error.name === "AbortError";
+        if (!active || isAbort) {
+          return;
+        }
+        setHeatmapSymbols([]);
+        setHeatmapSymbolsError(`Heatmap symbols failed: ${String(error)}`);
+      } finally {
+        if (active) {
+          setHeatmapSymbolsLoading(false);
+        }
+      }
+    }, 250);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [activeSection, heatmapConfigured, heatmapSymbolQuery]);
+
+  const loadHeatmapSnapshot = useCallback(
+    async ({ symbolId, silent = false } = {}) => {
+      const targetSymbol = String(symbolId || heatmapSymbolId || "").trim();
+      if (!targetSymbol) {
+        return;
+      }
+      if (!heatmapConfigured) {
+        setHeatmapError("Heatmap provider is not configured.");
+        return;
+      }
+
+      const requestSeq = heatmapRequestSeqRef.current + 1;
+      heatmapRequestSeqRef.current = requestSeq;
+
+      if (!silent) {
+        setHeatmapLoading(true);
+      }
+      setHeatmapError("");
+
+      try {
+        const params = new URLSearchParams({
+          symbol_id: targetSymbol,
+          levels: String(Math.trunc(clamp(toFiniteNumber(heatmapBucketCount, HEATMAP_DEFAULT_BUCKETS), 12, 120))),
+          range_bps: String(clamp(toFiniteNumber(heatmapRangeBps, HEATMAP_DEFAULT_RANGE_BPS), 25, 2500)),
+        });
+        const response = await fetch(`${API_BASE_URL}/heatmap/orderbook?${params.toString()}`);
+        if (!response.ok) {
+          let detail = `HTTP ${response.status}`;
+          try {
+            const payload = await response.json();
+            if (payload?.detail) {
+              detail = String(payload.detail);
+            }
+          } catch {
+            // ignore payload parsing errors
+          }
+          throw new Error(detail);
+        }
+        const payload = await response.json();
+        if (requestSeq !== heatmapRequestSeqRef.current) {
+          return;
+        }
+        setHeatmapData(payload || null);
+      } catch (error) {
+        if (requestSeq !== heatmapRequestSeqRef.current) {
+          return;
+        }
+        setHeatmapError(`Heatmap load failed: ${String(error)}`);
+      } finally {
+        if (requestSeq === heatmapRequestSeqRef.current && !silent) {
+          setHeatmapLoading(false);
+        }
+      }
+    },
+    [heatmapBucketCount, heatmapConfigured, heatmapRangeBps, heatmapSymbolId],
+  );
+
+  useEffect(() => {
+    if (activeSection !== "heatmap") {
+      return;
+    }
+    if (!heatmapSymbolId) {
+      return;
+    }
+
+    loadHeatmapSnapshot({ symbolId: heatmapSymbolId, silent: false });
+    const intervalMs = Math.max(1, toFiniteNumber(heatmapRefreshSec, HEATMAP_DEFAULT_REFRESH_SEC)) * 1000;
+    const intervalId = window.setInterval(() => {
+      loadHeatmapSnapshot({ symbolId: heatmapSymbolId, silent: true });
+    }, intervalMs);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [activeSection, heatmapSymbolId, heatmapRefreshSec, loadHeatmapSnapshot]);
 
   const filteredExchangeOptions = useMemo(() => {
     const sorted = [...allExchanges].filter((exchangeId) => isExchangeAllowed(exchangeId)).sort((a, b) => a.localeCompare(b));
@@ -766,6 +981,14 @@ function App() {
   const selectedChartTrendClass = priceDirectionById[selectedRowId || ""] || "";
   const natrFilterUiActive = natrCompressionEnabled || natrNormalEnabled || natrHighEnabled || natrExtremeEnabled;
   const showNatrColumn = showNatrInChart || natrFilterUiActive;
+  const heatmapConfigured = Boolean(heatmapProviderMeta?.configured);
+  const heatmapProviderName = String(heatmapProviderMeta?.provider || "unknown");
+  const heatmapBids = Array.isArray(heatmapData?.bids) ? heatmapData.bids : [];
+  const heatmapAsks = Array.isArray(heatmapData?.asks) ? heatmapData.asks : [];
+  const selectedHeatmapSymbolOption = useMemo(
+    () => heatmapSymbols.find((item) => String(item.symbol_id) === String(heatmapSymbolId)) || null,
+    [heatmapSymbols, heatmapSymbolId],
+  );
 
   const pushError = (message) => {
     const normalized = String(message || "Unknown error");
@@ -2044,6 +2267,24 @@ function App() {
         </div>
       </header>
 
+      <section className="section-switch">
+        <button
+          type="button"
+          className={`section-btn ${activeSection === "scanner" ? "active" : ""}`}
+          onClick={() => setActiveSection("scanner")}
+        >
+          CEX Screener
+        </button>
+        <button
+          type="button"
+          className={`section-btn ${activeSection === "heatmap" ? "active" : ""}`}
+          onClick={() => setActiveSection("heatmap")}
+        >
+          Orderbook Heatmap
+        </button>
+      </section>
+
+      <div className={activeSection === "scanner" ? "section-view active" : "section-view hidden-section"}>
       <section className="controls-grid">
         <div className="panel">
           <h2>Universe</h2>
@@ -2467,6 +2708,150 @@ function App() {
           </tbody>
         </table>
       </section>
+      </div>
+
+      <div className={activeSection === "heatmap" ? "section-view active" : "section-view hidden-section"}>
+        <section className="heatmap-panel">
+          <div className="heatmap-toolbar">
+            <div className="heatmap-controls">
+              <label>
+                Symbol search
+                <input
+                  value={heatmapSymbolQuery}
+                  onChange={(event) => setHeatmapSymbolQuery(event.target.value)}
+                  placeholder="Search by exchange, base, quote or symbol id"
+                />
+              </label>
+              <label>
+                Symbol
+                <select value={heatmapSymbolId} onChange={(event) => setHeatmapSymbolId(event.target.value)}>
+                  <option value="">Select symbol</option>
+                  {heatmapSymbols.map((item) => (
+                    <option key={item.symbol_id} value={item.symbol_id}>
+                      {formatHeatmapSymbolLabel(item)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="row-3">
+                <label>
+                  Buckets / side
+                  <input
+                    type="number"
+                    min="12"
+                    max="120"
+                    value={heatmapBucketCount}
+                    onChange={(event) => setHeatmapBucketCount(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Range (bps)
+                  <input
+                    type="number"
+                    min="25"
+                    max="2500"
+                    value={heatmapRangeBps}
+                    onChange={(event) => setHeatmapRangeBps(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Refresh sec
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    step="1"
+                    value={heatmapRefreshSec}
+                    onChange={(event) => setHeatmapRefreshSec(event.target.value)}
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="heatmap-meta">
+              <div>Provider: {heatmapProviderName}</div>
+              <div>Configured: {heatmapConfigured ? "yes" : "no"}</div>
+              <div>
+                Symbol: {selectedHeatmapSymbolOption ? formatHeatmapSymbolLabel(selectedHeatmapSymbolOption) : "-"}
+              </div>
+              <button
+                type="button"
+                className="draw-btn"
+                onClick={() => loadHeatmapSnapshot({ symbolId: heatmapSymbolId, silent: false })}
+                disabled={!heatmapSymbolId || !heatmapConfigured}
+              >
+                Refresh now
+              </button>
+            </div>
+          </div>
+
+          {heatmapSymbolsLoading && <div className="meta-note">Loading licensed symbols...</div>}
+          {heatmapSymbolsError && <div className="meta-error">{heatmapSymbolsError}</div>}
+          {heatmapError && <div className="meta-error">{heatmapError}</div>}
+
+          {!heatmapConfigured && (
+            <div className="meta-note">
+              Heatmap requires licensed provider credentials on backend. Set `COINAPI_API_KEY` and restart backend.
+            </div>
+          )}
+
+          <div className="heatmap-canvas">
+            {heatmapLoading && <div className="chart-overlay">Loading heatmap...</div>}
+            {!heatmapData && !heatmapLoading && (
+              <div className="chart-overlay">Select a symbol to load orderbook heatmap.</div>
+            )}
+
+            {heatmapData && (
+              <div className="heatmap-grid">
+                <div className="heatmap-side">
+                  <div className="heatmap-side-title">Bids</div>
+                  {heatmapBids.map((bucket) => (
+                    <div key={`bid-${bucket.bucket_index}`} className="heatmap-row">
+                      <span className="heatmap-price">
+                        {formatNum(bucket.reference_price, priceDisplayDigits(bucket.reference_price))}
+                      </span>
+                      <div className="heatmap-bar-track">
+                        <div
+                          className="heatmap-bar bid-bar"
+                          style={{ width: `${Math.max(2, Math.round(Number(bucket.intensity || 0) * 100))}%` }}
+                        />
+                      </div>
+                      <span className="heatmap-size">{formatNum(bucket.total_notional, 0)}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="heatmap-mid">
+                  <div className="heatmap-mid-value">
+                    Mid: {formatNum(heatmapData.mid_price, priceDisplayDigits(heatmapData.mid_price))}
+                  </div>
+                  <div>Spread (bps): {formatNum(heatmapData.spread_bps, 2)}</div>
+                  <div>Range: +/- {formatNum(heatmapData.range_bps, 0)} bps</div>
+                  <div>Buckets: {heatmapData.bucket_count || "-"}</div>
+                  <div>Updated: {heatmapData.fetched_at_utc || "-"}</div>
+                </div>
+
+                <div className="heatmap-side">
+                  <div className="heatmap-side-title">Asks</div>
+                  {heatmapAsks.map((bucket) => (
+                    <div key={`ask-${bucket.bucket_index}`} className="heatmap-row">
+                      <span className="heatmap-price">
+                        {formatNum(bucket.reference_price, priceDisplayDigits(bucket.reference_price))}
+                      </span>
+                      <div className="heatmap-bar-track">
+                        <div
+                          className="heatmap-bar ask-bar"
+                          style={{ width: `${Math.max(2, Math.round(Number(bucket.intensity || 0) * 100))}%` }}
+                        />
+                      </div>
+                      <span className="heatmap-size">{formatNum(bucket.total_notional, 0)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

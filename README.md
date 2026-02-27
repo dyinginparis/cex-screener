@@ -35,3 +35,23 @@ npm run dev
 ## Notes
 - WebSocket endpoint: `ws://localhost:8000/ws/live`
 - Exchange metadata endpoint: `http://localhost:8000/meta/exchanges`
+- Heatmap provider metadata: `http://localhost:8000/meta/heatmap`
+- Heatmap symbols: `http://localhost:8000/heatmap/symbols`
+- Heatmap snapshot: `http://localhost:8000/heatmap/orderbook`
+
+## Licensed Heatmap Setup
+
+The new **Orderbook Heatmap** tab uses a licensed provider path (CoinAPI) for commercial-ready data workflows.
+
+Set environment variable before starting backend:
+
+```powershell
+$env:COINAPI_API_KEY="your_coinapi_key"
+```
+
+Optional:
+
+```powershell
+$env:HEATMAP_PROVIDER="coinapi"
+$env:COINAPI_REST_BASE="https://rest.coinapi.io"
+```

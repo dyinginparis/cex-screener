@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import time
 from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 import ccxt
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -17,6 +23,14 @@ CHART_TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d"}
 EXCLUDED_EXCHANGE_TOKENS = ("kraken", "mexc")
 _chart_exchange_cache: dict[str, ccxt.Exchange] = {}
 _chart_exchange_locks: dict[str, asyncio.Lock] = {}
+
+HEATMAP_PROVIDER = os.getenv("HEATMAP_PROVIDER", "coinapi").strip().lower()
+COINAPI_REST_BASE = os.getenv("COINAPI_REST_BASE", "https://rest.coinapi.io").strip().rstrip("/")
+COINAPI_API_KEY = os.getenv("COINAPI_API_KEY", "").strip()
+HEATMAP_SYMBOL_CACHE_TTL_SEC = 300.0
+HEATMAP_HTTP_TIMEOUT_SEC = 20.0
+_heatmap_symbol_cache: tuple[float, list[dict[str, Any]]] | None = None
+_heatmap_symbol_lock = asyncio.Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -64,6 +78,342 @@ async def meta_exchanges() -> dict[str, Any]:
         key=lambda value: value.lower(),
     )
     return {"count": len(exchanges), "exchanges": exchanges}
+
+
+def _heatmap_provider_info() -> dict[str, Any]:
+    return {
+        "provider": HEATMAP_PROVIDER,
+        "configured": HEATMAP_PROVIDER == "coinapi" and bool(COINAPI_API_KEY),
+        "legal_mode": "licensed-commercial-feed-required",
+        "notes": [
+            "Heatmap endpoint is intended for licensed/commercial market-data usage.",
+            "Redistribution/resale rights depend on your provider agreement.",
+        ],
+    }
+
+
+@app.get("/meta/heatmap")
+async def meta_heatmap() -> dict[str, Any]:
+    return _heatmap_provider_info()
+
+
+def _ensure_heatmap_provider_ready() -> None:
+    if HEATMAP_PROVIDER != "coinapi":
+        raise HTTPException(
+            status_code=501,
+            detail=f"unsupported HEATMAP_PROVIDER '{HEATMAP_PROVIDER}'. expected: coinapi",
+        )
+    if not COINAPI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "heatmap provider is not configured. Set COINAPI_API_KEY in backend environment "
+                "to use licensed heatmap data."
+            ),
+        )
+
+
+def _coinapi_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        "X-CoinAPI-Key": COINAPI_API_KEY,
+    }
+
+
+def _http_get_json(url: str, headers: dict[str, str], timeout_sec: float = HEATMAP_HTTP_TIMEOUT_SEC) -> Any:
+    request = urllib_request.Request(url=url, method="GET", headers=headers)
+    with urllib_request.urlopen(request, timeout=timeout_sec) as response:  # noqa: S310 - fixed provider URL
+        raw = response.read()
+        text = raw.decode("utf-8", errors="replace")
+        return json.loads(text)
+
+
+def _extract_coinapi_symbols(payload: Any) -> list[dict[str, Any]]:
+    rows = payload if isinstance(payload, list) else payload.get("data", []) if isinstance(payload, dict) else []
+    out: list[dict[str, Any]] = []
+
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        symbol_id = str(item.get("symbol_id") or "").strip()
+        if not symbol_id:
+            continue
+
+        symbol_type = str(item.get("symbol_type") or "").strip().upper()
+        if symbol_type and symbol_type not in {"SPOT", "PERPETUAL", "FUTURES"}:
+            continue
+
+        base = str(item.get("asset_id_base") or "").strip().upper()
+        quote = str(item.get("asset_id_quote") or "").strip().upper()
+        exchange_id = str(item.get("exchange_id") or "").strip().lower()
+        out.append(
+            {
+                "symbol_id": symbol_id,
+                "exchange_id": exchange_id,
+                "base": base,
+                "quote": quote,
+                "symbol_type": symbol_type or "UNKNOWN",
+            }
+        )
+    return out
+
+
+def _coinapi_fetch_all_symbols() -> list[dict[str, Any]]:
+    url = f"{COINAPI_REST_BASE}/v1/symbols"
+    payload = _http_get_json(url, _coinapi_headers())
+    rows = _extract_coinapi_symbols(payload)
+    rows.sort(
+        key=lambda item: (
+            str(item.get("exchange_id") or ""),
+            str(item.get("base") or ""),
+            str(item.get("quote") or ""),
+            str(item.get("symbol_id") or ""),
+        )
+    )
+    return rows
+
+
+async def _get_heatmap_symbols_cached() -> list[dict[str, Any]]:
+    global _heatmap_symbol_cache
+
+    now_ts = time.time()
+    cached = _heatmap_symbol_cache
+    if cached and (now_ts - cached[0]) < HEATMAP_SYMBOL_CACHE_TTL_SEC:
+        return cached[1]
+
+    async with _heatmap_symbol_lock:
+        now_ts = time.time()
+        cached = _heatmap_symbol_cache
+        if cached and (now_ts - cached[0]) < HEATMAP_SYMBOL_CACHE_TTL_SEC:
+            return cached[1]
+
+        try:
+            symbols = await asyncio.to_thread(_coinapi_fetch_all_symbols)
+        except urllib_error.HTTPError as exc:
+            status = int(getattr(exc, "code", 502))
+            try:
+                detail_text = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail_text = str(exc)
+            raise HTTPException(
+                status_code=502,
+                detail=f"coinapi symbols request failed (HTTP {status}): {detail_text[:200]}",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"coinapi symbols request failed: {exc}") from exc
+
+        _heatmap_symbol_cache = (now_ts, symbols)
+        return symbols
+
+
+@app.get("/heatmap/symbols")
+async def heatmap_symbols(
+    search: str = Query("", description="Case-insensitive symbol filter"),
+    limit: int = Query(120, ge=10, le=500),
+) -> dict[str, Any]:
+    _ensure_heatmap_provider_ready()
+    symbols = await _get_heatmap_symbols_cached()
+    query = str(search or "").strip().lower()
+
+    if query:
+        filtered = [
+            item
+            for item in symbols
+            if query in str(item.get("symbol_id") or "").lower()
+            or query in str(item.get("base") or "").lower()
+            or query in str(item.get("quote") or "").lower()
+            or query in str(item.get("exchange_id") or "").lower()
+        ]
+    else:
+        filtered = symbols
+
+    return {
+        "provider": HEATMAP_PROVIDER,
+        "count": len(filtered),
+        "items": filtered[:limit],
+    }
+
+
+def _parse_orderbook_side(raw_side: Any) -> list[tuple[float, float]]:
+    out: list[tuple[float, float]] = []
+    if not isinstance(raw_side, list):
+        return out
+
+    for level in raw_side:
+        price: float | None = None
+        size: float | None = None
+
+        if isinstance(level, (list, tuple)) and len(level) >= 2:
+            try:
+                price = float(level[0])
+                size = float(level[1])
+            except Exception:
+                continue
+        elif isinstance(level, dict):
+            for key in ("price", "rate", "limit_price", "px"):
+                if key in level:
+                    try:
+                        price = float(level[key])
+                        break
+                    except Exception:
+                        price = None
+            for key in ("size", "quantity", "qty", "volume", "amount"):
+                if key in level:
+                    try:
+                        size = float(level[key])
+                        break
+                    except Exception:
+                        size = None
+        if price is None or size is None:
+            continue
+        if price <= 0 or size <= 0:
+            continue
+        out.append((price, size))
+    return out
+
+
+def _aggregate_side_bins(
+    side_levels: list[tuple[float, float]],
+    mid_price: float,
+    side: str,
+    bucket_count: int,
+    range_bps: float,
+) -> list[dict[str, Any]]:
+    if mid_price <= 0 or bucket_count <= 0 or range_bps <= 0:
+        return []
+
+    bucket_width = range_bps / bucket_count
+    buckets = [
+        {
+            "bucket_index": index,
+            "from_bps": index * bucket_width,
+            "to_bps": (index + 1) * bucket_width,
+            "total_size": 0.0,
+            "total_notional": 0.0,
+            "level_count": 0,
+        }
+        for index in range(bucket_count)
+    ]
+
+    for price, size in side_levels:
+        if side == "bid":
+            distance_bps = ((mid_price - price) / mid_price) * 10000.0
+        else:
+            distance_bps = ((price - mid_price) / mid_price) * 10000.0
+        if distance_bps < 0:
+            continue
+        if distance_bps > range_bps:
+            continue
+
+        bucket_index = min(bucket_count - 1, int(distance_bps / bucket_width))
+        bucket = buckets[bucket_index]
+        bucket["total_size"] += size
+        bucket["total_notional"] += price * size
+        bucket["level_count"] += 1
+
+    max_notional = max((float(bucket["total_notional"]) for bucket in buckets), default=0.0)
+
+    for bucket in buckets:
+        mid_bps = (float(bucket["from_bps"]) + float(bucket["to_bps"])) / 2.0
+        if side == "bid":
+            ref_price = mid_price * (1.0 - mid_bps / 10000.0)
+        else:
+            ref_price = mid_price * (1.0 + mid_bps / 10000.0)
+        bucket["reference_price"] = ref_price
+        bucket["intensity"] = (
+            float(bucket["total_notional"]) / max_notional if max_notional > 0 else 0.0
+        )
+
+    if side == "ask":
+        buckets.sort(key=lambda item: float(item["from_bps"]))
+    else:
+        buckets.sort(key=lambda item: float(item["from_bps"]))
+    return buckets
+
+
+def _extract_orderbook_payload(raw_payload: Any) -> dict[str, Any]:
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    if isinstance(raw_payload, list) and raw_payload and isinstance(raw_payload[0], dict):
+        return raw_payload[0]
+    return {}
+
+
+def _fetch_coinapi_orderbook(symbol_id: str, limit_levels: int) -> dict[str, Any]:
+    encoded_symbol = urllib_parse.quote(symbol_id, safe="")
+    urls = [
+        f"{COINAPI_REST_BASE}/v1/orderbooks/{encoded_symbol}/current?limit_levels={limit_levels}",
+        f"{COINAPI_REST_BASE}/v1/orderbooks3/{encoded_symbol}/current?limit_levels={limit_levels}",
+        f"{COINAPI_REST_BASE}/v1/orderbooks/{encoded_symbol}/snapshot?limit_levels={limit_levels}",
+    ]
+    headers = _coinapi_headers()
+
+    last_error = "unknown orderbook error"
+    for url in urls:
+        try:
+            payload = _http_get_json(url, headers)
+            parsed = _extract_orderbook_payload(payload)
+            if parsed:
+                return parsed
+        except urllib_error.HTTPError as exc:
+            status = int(getattr(exc, "code", 502))
+            try:
+                detail_text = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail_text = str(exc)
+            last_error = f"HTTP {status}: {detail_text[:180]}"
+            continue
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+    raise HTTPException(status_code=502, detail=f"coinapi orderbook request failed: {last_error}")
+
+
+@app.get("/heatmap/orderbook")
+async def heatmap_orderbook(
+    symbol_id: str = Query(..., description="CoinAPI symbol id (e.g. BINANCE_SPOT_BTC_USDT)"),
+    levels: int = Query(32, ge=12, le=120, description="Heatmap bucket count per side"),
+    range_bps: float = Query(300.0, ge=25.0, le=2500.0, description="Visible range in basis points from mid"),
+) -> dict[str, Any]:
+    _ensure_heatmap_provider_ready()
+    normalized_symbol = str(symbol_id or "").strip()
+    if not normalized_symbol:
+        raise HTTPException(status_code=400, detail="symbol_id is required")
+
+    raw_book = await asyncio.to_thread(_fetch_coinapi_orderbook, normalized_symbol, max(120, levels * 3))
+    bids = _parse_orderbook_side(raw_book.get("bids"))
+    asks = _parse_orderbook_side(raw_book.get("asks"))
+    bids.sort(key=lambda item: item[0], reverse=True)
+    asks.sort(key=lambda item: item[0])
+
+    top_bid = bids[0][0] if bids else None
+    top_ask = asks[0][0] if asks else None
+    if top_bid and top_ask:
+        mid_price = (top_bid + top_ask) / 2.0
+    elif top_bid:
+        mid_price = top_bid
+    elif top_ask:
+        mid_price = top_ask
+    else:
+        raise HTTPException(status_code=404, detail=f"no orderbook levels returned for {normalized_symbol}")
+
+    spread_bps = ((top_ask - top_bid) / mid_price) * 10000.0 if top_bid and top_ask and mid_price > 0 else None
+    bid_bins = _aggregate_side_bins(bids, mid_price, "bid", levels, range_bps)
+    ask_bins = _aggregate_side_bins(asks, mid_price, "ask", levels, range_bps)
+
+    return {
+        "provider": HEATMAP_PROVIDER,
+        "symbol_id": normalized_symbol,
+        "mid_price": mid_price,
+        "spread_bps": spread_bps,
+        "range_bps": range_bps,
+        "bucket_count": levels,
+        "bids": bid_bins,
+        "asks": ask_bins,
+        "fetched_at_utc": now_utc_text(),
+        "legal_mode": "derived-display",
+    }
 
 
 async def _get_chart_exchange(exchange_id: str) -> ccxt.Exchange:
