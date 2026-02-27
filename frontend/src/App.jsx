@@ -18,6 +18,8 @@ const WS_RECONNECT_BASE_MS = 1500;
 const WS_RECONNECT_MAX_MS = 15000;
 const WS_STALE_TIMEOUT_MS = 60000;
 const WS_STALE_CHECK_INTERVAL_MS = 10000;
+const WS_AUTO_RECOVERY_COOLDOWN_MS = 15000;
+const WS_AUTO_RECOVERY_STALE_MS = 20000;
 const CHART_TIMEFRAME_MS = {
   "1m": 60_000,
   "3m": 180_000,
@@ -465,6 +467,7 @@ function App() {
   const reconnectAttemptRef = useRef(0);
   const shouldResyncOnOpenRef = useRef(false);
   const lastServerEventMsRef = useRef(Date.now());
+  const lastAutoRecoveryMsRef = useRef(0);
   const manualDisconnectRef = useRef(false);
   const selectedRowIdRef = useRef(null);
   const chartTimeframeRef = useRef("1m");
@@ -1110,6 +1113,7 @@ function App() {
       clearReconnectTimer();
       reconnectAttemptRef.current = 0;
       lastServerEventMsRef.current = Date.now();
+      lastAutoRecoveryMsRef.current = 0;
       setConnected(true);
 
       if (shouldResyncOnOpenRef.current && hasStartedRef.current) {
@@ -1169,6 +1173,45 @@ function App() {
         pushError(`Invalid server message: ${String(err)}`);
       }
     };
+  };
+
+  const triggerAutoRecoveryRefresh = (reason) => {
+    if (!hasStartedRef.current) {
+      return;
+    }
+    if (manualDisconnectRef.current) {
+      return;
+    }
+
+    const state = engineStateRef.current;
+    if (["paused", "stopped", "idle"].includes(state)) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastAutoRecoveryMsRef.current < WS_AUTO_RECOVERY_COOLDOWN_MS) {
+      return;
+    }
+    lastAutoRecoveryMsRef.current = now;
+    shouldResyncOnOpenRef.current = true;
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      pushError(`Auto recovery refresh (${reason}): reconnecting...`);
+      connectSocket();
+      return;
+    }
+
+    if (ws.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    pushError(`Auto recovery refresh (${reason}).`);
+    try {
+      ws.close(4001, "auto-recovery-refresh");
+    } catch {
+      scheduleReconnect(reason);
+    }
   };
 
   const send = (message) => {
@@ -1287,6 +1330,7 @@ function App() {
     clearReconnectTimer();
     reconnectAttemptRef.current = 0;
     lastServerEventMsRef.current = Date.now();
+    lastAutoRecoveryMsRef.current = 0;
 
     rowsByIdRef.current = {};
     priceDirectionByIdRef.current = {};
@@ -1332,6 +1376,7 @@ function App() {
     reconnectAttemptRef.current = 0;
     pendingRef.current = [];
     hasStartedRef.current = false;
+    lastAutoRecoveryMsRef.current = 0;
     lastUniverseKeyRef.current = "";
     lastFilterKeyRef.current = "";
     rowsByIdRef.current = {};
@@ -1374,6 +1419,7 @@ function App() {
     clearReconnectTimer();
     reconnectAttemptRef.current = 0;
     pendingRef.current = [];
+    lastAutoRecoveryMsRef.current = 0;
     lastUniverseKeyRef.current = "";
     lastFilterKeyRef.current = "";
     rowsByIdRef.current = {};
@@ -1423,6 +1469,7 @@ function App() {
       clearReconnectTimer();
       reconnectAttemptRef.current = 0;
       lastServerEventMsRef.current = Date.now();
+      lastAutoRecoveryMsRef.current = 0;
       rowsByIdRef.current = {};
       priceDirectionByIdRef.current = {};
       setRowsById({});
@@ -1905,6 +1952,65 @@ function App() {
 
     return () => {
       window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const checkAndRecover = (source) => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        return;
+      }
+      if (!hasStartedRef.current || manualDisconnectRef.current) {
+        return;
+      }
+
+      const state = engineStateRef.current;
+      if (["paused", "stopped", "idle"].includes(state)) {
+        return;
+      }
+
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        triggerAutoRecoveryRefresh(`${source}: socket`);
+        return;
+      }
+
+      const staleMs = Date.now() - lastServerEventMsRef.current;
+      const staleThreshold = Math.max(WS_AUTO_RECOVERY_STALE_MS, Math.trunc(WS_STALE_TIMEOUT_MS * 0.6));
+      if (staleMs >= staleThreshold) {
+        triggerAutoRecoveryRefresh(`${source}: ${Math.round(staleMs / 1000)}s stale`);
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      checkAndRecover("tab visible");
+    };
+    const onFocus = () => checkAndRecover("window focus");
+    const onOnline = () => checkAndRecover("network online");
+    const onPageShow = () => checkAndRecover("pageshow");
+
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("pageshow", onPageShow);
+
+    const warmupId = window.setTimeout(() => {
+      checkAndRecover("warmup");
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(warmupId);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("pageshow", onPageShow);
     };
   }, []);
 
