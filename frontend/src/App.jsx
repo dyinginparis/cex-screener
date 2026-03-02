@@ -664,7 +664,7 @@ function App() {
     const timeoutId = window.setTimeout(async () => {
       if (!providerReady) {
         setHeatmapSymbols([]);
-        setHeatmapSymbolsError("Heatmap provider is not configured.");
+        setHeatmapSymbolsError("Heatmap backend is currently unavailable.");
         return;
       }
 
@@ -738,7 +738,7 @@ function App() {
       }
       const providerReady = Boolean(heatmapProviderMeta?.configured);
       if (!providerReady) {
-        setHeatmapError("Heatmap provider is not configured.");
+        setHeatmapError("Heatmap backend is currently unavailable.");
         return;
       }
 
@@ -2858,9 +2858,9 @@ function App() {
           {heatmapSymbolsError && <div className="meta-error">{heatmapSymbolsError}</div>}
           {heatmapError && <div className="meta-error">{heatmapError}</div>}
 
-          {!heatmapConfigured && heatmapProviderName === "coinapi" && (
+          {!heatmapConfigured && (
             <div className="meta-note">
-              Heatmap requires licensed provider credentials on backend. Set `COINAPI_API_KEY` and restart backend.
+              Heatmap backend is unavailable. Check backend connection and restart the API service.
             </div>
           )}
           {heatmapConfigured && heatmapSymbols.length === 0 && !heatmapSymbolsLoading && (

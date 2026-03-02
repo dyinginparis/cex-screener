@@ -32,15 +32,11 @@ Server messages:
 - `GET /heatmap/symbols?search=BTC&limit=120&exchange_id=bybit&market_type=perpetual`
 - `GET /heatmap/orderbook?symbol_id=bybit|BTC/USDT:USDT&levels=32&range_bps=300`
 
-Provider modes:
-- `HEATMAP_PROVIDER=auto` (default): `coinapi` if key exists, else `ccxt`
-- `HEATMAP_PROVIDER=ccxt`: direct exchange snapshot orderbook
-- `HEATMAP_PROVIDER=coinapi`: licensed provider path
+Mode:
+- Heatmap runs with `ccxt` only (direct exchange snapshot orderbook)
 
-CoinAPI optional env:
+Optional env:
 
 ```powershell
-$env:COINAPI_API_KEY="your_coinapi_key"
-$env:COINAPI_REST_BASE="https://rest.coinapi.io"
 $env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
 ```

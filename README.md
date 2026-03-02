@@ -41,27 +41,10 @@ npm run dev
 
 ## Heatmap Provider Setup
 
-The **Orderbook Heatmap** tab supports:
-
-- `auto` (default): uses `ccxt` when no `COINAPI_API_KEY` is set, otherwise `coinapi`
-- `ccxt`: direct exchange snapshot orderbooks
-- `coinapi`: licensed provider path via CoinAPI
-
-Optional provider selection:
-
-```powershell
-$env:HEATMAP_PROVIDER="auto"   # auto | ccxt | coinapi
-```
-
-CoinAPI mode (if you want licensed-provider feed):
-
-```powershell
-$env:COINAPI_API_KEY="your_coinapi_key"
-```
+The **Orderbook Heatmap** tab runs with **CCXT only** (direct exchange snapshot orderbooks).
 
 Optional:
 
 ```powershell
-$env:COINAPI_REST_BASE="https://rest.coinapi.io"
 $env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
 ```
