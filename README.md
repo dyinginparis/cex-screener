@@ -35,16 +35,5 @@ npm run dev
 ## Notes
 - WebSocket endpoint: `ws://localhost:8000/ws/live`
 - Exchange metadata endpoint: `http://localhost:8000/meta/exchanges`
-- Heatmap provider metadata: `http://localhost:8000/meta/heatmap`
-- Heatmap symbols: `http://localhost:8000/heatmap/symbols`
-- Heatmap snapshot: `http://localhost:8000/heatmap/orderbook`
-
-## Heatmap Provider Setup
-
-The **Orderbook Heatmap** tab runs with **CCXT only** (direct exchange snapshot orderbooks).
-
-Optional:
-
-```powershell
-$env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
-```
+- Symbols endpoint: `http://localhost:8000/symbols`
+- Chart candles endpoint: `http://localhost:8000/chart/ohlcv`

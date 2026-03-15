@@ -26,17 +26,8 @@ Server messages:
 - `diff` (`added`, `updated`, `removed`)
 - `error`
 
-## Heatmap Endpoints
+## REST Endpoints
 
-- `GET /meta/heatmap`
-- `GET /heatmap/symbols?search=BTC&limit=120&exchange_id=bybit&market_type=perpetual`
-- `GET /heatmap/orderbook?symbol_id=bybit|BTC/USDT:USDT&levels=32&range_bps=300`
-
-Mode:
-- Heatmap runs with `ccxt` only (direct exchange snapshot orderbook)
-
-Optional env:
-
-```powershell
-$env:HEATMAP_CCXT_DEFAULT_EXCHANGE="bybit"
-```
+- `GET /meta/exchanges`
+- `GET /symbols?exchange_id=bybit&market_type=perpetual&search=btc`
+- `GET /chart/ohlcv?exchange_id=bybit&symbol=BTC/USDT:USDT&timeframe=1m&limit=300`
